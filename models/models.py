@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import os
+import wandb
 import tqdm
 from utils import general
 from networks import networks
@@ -9,11 +10,14 @@ from objectives import ncc
 from objectives import regularizers
 from utils.general import set_kernel
 from objectives.nmi import NMI
+from objectives.dice import MultiLabelDiceLoss
 import numpy as np
+import matplotlib.pyplot as plt
 from deepali.core.bspline import evaluate_cubic_bspline
 from deepali.spatial.bspline import FreeFormDeformation
 from deepali.core import Grid
 from utils.metric import measure_seg_metrics, measure_disp_metrics
+from utils.image_io import save_nifti
 
 
 class input_mapping(nn.Module):
@@ -81,26 +85,21 @@ class ImplicitRegistrator:
             kwargs["optimizer"] if "optimizer" in kwargs else self.args["optimizer"]
         )
         self.loss_function_arg = (
-            kwargs["loss_function"]
-            if "loss_function" in kwargs
-            else self.args["loss_function"]
+            kwargs["loss_function"] if "loss_function" in kwargs else self.args["loss_function"]
         )
         self.weight_init = (
-            kwargs["weight_init"]
-            if "weight_init" in kwargs
-            else self.args["weight_init"]
+            kwargs["weight_init"] if "weight_init" in kwargs else self.args["weight_init"]
         )
-        self.deformable_layers = kwargs["deformable_layers"] if "deformable_layers" in kwargs else self.args["deformable_layers"]
+        self.deformable_layers = (
+            kwargs["deformable_layers"] if "deformable_layers" in kwargs else self.args["deformable_layers"]
+        )
         self.weight_init = (
-            kwargs["weight_init"]
-            if "weight_init" in kwargs
-            else self.args["weight_init"]
+            kwargs["weight_init"] if "weight_init" in kwargs else self.args["weight_init"]
         )
-        self.omega = kwargs["omega"] if "omega" in kwargs else self.args["omega"]
+        self.omega = (kwargs["omega"] if "omega" in kwargs else self.args["omega"])
+        
         self.save_folder = (
-            kwargs["save_folder"]
-            if "save_folder" in kwargs
-            else self.args["save_folder"]
+            kwargs["save_folder"] if "save_folder" in kwargs else self.args["save_folder"]
         )
 
         # Parse other arguments from kwargs
@@ -129,43 +128,28 @@ class ImplicitRegistrator:
             kwargs["network"] if "network" in kwargs else self.args["network"]
         )
         self.network_type = (
-            kwargs["network_type"]
-            if "network_type" in kwargs
-            else self.args["network_type"]
+            kwargs["network_type"] if "network_type" in kwargs else self.args["network_type"]
         )
 
-        self.positional_encoding = (
-            kwargs["positional_encoding"]
-            if "positional_encoding" in kwargs
-            else self.args["positional_encoding"]
+        self.positional_encoding = (kwargs["positional_encoding"] 
+            if "positional_encoding" in kwargs else self.args["positional_encoding"]
         )
 
-        self.registration_type = (
-            kwargs["registration_type"]
-            if "registration_type" in kwargs
-            else self.args["registration_type"]
+        self.registration_type = (kwargs["registration_type"]
+            if "registration_type" in kwargs else self.args["registration_type"]
         )
 
-        self.mapping_size = (
-            kwargs["mapping_size"]
-            if "mapping_size" in kwargs
-            else self.args["mapping_size"]
+        self.mapping_size = (kwargs["mapping_size"]
+            if "mapping_size" in kwargs else self.args["mapping_size"]
         )
-        self.scale = (
-            kwargs["scale"]
-            if "scale" in kwargs
-            else self.args["scale"]
+        self.scale = (kwargs["scale"]
+            if "scale" in kwargs else self.args["scale"]
         )
-        self.factor = (
-            kwargs["factor"]
-            if "factor" in kwargs
-            else self.args["factor"]
+        self.factor = (kwargs["factor"]
+            if "factor" in kwargs else self.args["factor"]
         )
-
-        self.log_interval = (
-            kwargs["log_interval"]
-            if "log_interval" in kwargs
-            else self.args["log_interval"]
+        self.log_interval = (kwargs["log_interval"] 
+            if "log_interval" in kwargs else self.args["log_interval"]
         )
 
         if self.network_from_file is None:
@@ -176,9 +160,7 @@ class ImplicitRegistrator:
             if self.verbose:
                 if self.registration_type == "deformable":
                     print(
-                        "Deformable network contains {} trainable parameters.".format(
-                            general.count_parameters(self.deform_net)
-                        )
+                        "Deformable network contains {} trainable parameters.".format(general.count_parameters(self.deform_net))
                     )
         else:
             # TODO:
@@ -191,17 +173,15 @@ class ImplicitRegistrator:
         # Choose the optimizer
         if self.optimizer_arg.lower() == "sgd":
             self.optimizer = optim.SGD(
-                self.network.parameters(), lr=self.def_lr, momentum=self.momentum
-            )
+                self.network.parameters(), lr=self.def_lr, momentum=self.momentum)
         elif self.optimizer_arg.lower() == "adam":
-            self.optimizer = optim.Adam(params=[{"name": "Def", "params": self.deform_net.parameters(), "lr": self.def_lr}])
+            self.optimizer = optim.Adam(
+                params=[{"name": "Def", "params": self.deform_net.parameters(), "lr": self.def_lr}])
         elif self.optimizer_arg.lower() == "adadelta":
             self.optimizer = optim.Adadelta(self.network.parameters(), lr=self.def_lr)
 
         else:
-            self.optimizer = optim.SGD(
-                self.network.parameters(), lr=self.def_lr, momentum=self.momentum
-            )
+            self.optimizer = optim.SGD(self.network.parameters(), lr=self.def_lr, momentum=self.momentum)
             print(
                 "WARNING: "
                 + str(self.optimizer_arg)
@@ -234,49 +214,38 @@ class ImplicitRegistrator:
                 + " not recognized as loss function, picked MSE instead"
             )
 
+        # define segmentation loss
+        self.seg_criterion = MultiLabelDiceLoss()
+
         # Move variables to GPU
         if self.gpu:
             self.deform_net.cuda()
 
         # Parse regularization kwargs
         self.jacobian_regularization = (
-            kwargs["jacobian_regularization"]
-            if "jacobian_regularization" in kwargs
-            else self.args["jacobian_regularization"]
+            kwargs["jacobian_regularization"] if "jacobian_regularization" in kwargs else self.args["jacobian_regularization"]
         )
         self.alpha_jacobian = (
-            kwargs["alpha_jacobian"]
-            if "alpha_jacobian" in kwargs
-            else self.args["alpha_jacobian"]
+            kwargs["alpha_jacobian"] if "alpha_jacobian" in kwargs else self.args["alpha_jacobian"]
         )
 
         self.hyper_regularization = (
-            kwargs["hyper_regularization"]
-            if "hyper_regularization" in kwargs
-            else self.args["hyper_regularization"]
+            kwargs["hyper_regularization"] if "hyper_regularization" in kwargs else self.args["hyper_regularization"]
         )
         self.alpha_hyper = (
-            kwargs["alpha_hyper"]
-            if "alpha_hyper" in kwargs
-            else self.args["alpha_hyper"]
+            kwargs["alpha_hyper"] if "alpha_hyper" in kwargs else self.args["alpha_hyper"]
         )
 
         self.bending_regularization = (
-            kwargs["bending_regularization"]
-            if "bending_regularization" in kwargs
-            else self.args["bending_regularization"]
+            kwargs["bending_regularization"] if "bending_regularization" in kwargs else self.args["bending_regularization"]
         )
         self.alpha_bending = (
-            kwargs["alpha_bending"]
-            if "alpha_bending" in kwargs
-            else self.args["alpha_bending"]
+            kwargs["alpha_bending"] if "alpha_bending" in kwargs else self.args["alpha_bending"]
         )
 
         # Parse arguments from kwargs
         self.image_shape = (
-            kwargs["image_shape"]
-            if "image_shape" in kwargs
-            else self.args["image_shape"]
+            kwargs["image_shape"] if "image_shape" in kwargs else self.args["image_shape"]
         )
         self.batch_size = (
             kwargs["batch_size"] if "batch_size" in kwargs else self.args["batch_size"]
@@ -293,9 +262,13 @@ class ImplicitRegistrator:
         self.fixed_image = batch['fixed']
         self.fixed_mask = batch['fixed_mask']
         self.moving_mask = batch['moving_mask']
-        self.mask = torch.logical_or(batch['fixed_mask'], batch['moving_mask']).float()
+        # NOTE: cannot use masks when resolutions of fixed and moving images are different (and they are not croped/padded)
+        # self.mask = torch.logical_or(batch['fixed_mask'], batch['moving_mask']).float()
         self.fixed_seg = batch['fixed_seg']
         self.moving_seg = batch['moving_seg']
+
+        print(f"unique values in fixed seg: {torch.unique(self.fixed_seg)}")
+        print(f"unique values in moving seg: {torch.unique(self.moving_seg)}")
 
         self.batch = {}
 
@@ -308,33 +281,42 @@ class ImplicitRegistrator:
             self.transformation = evaluate_cubic_bspline
             self.padding = 2*self.padding
             self.padded_fixed = torch.nn.functional.pad(self.fixed_image, self.padding, value=0)
-            self.padded_mask = torch.nn.functional.pad(self.fixed_mask*self.moving_mask, self.padding, value=0)
+            print(f"padded_fixed shape: {self.padded_fixed.shape}")
+            # self.padded_mask = torch.nn.functional.pad(self.fixed_mask*self.moving_mask, self.padding, value=0)
 
             # TODO: we have to account for non cubic images
             self.num_pixels = torch.prod(torch.tensor(self.padded_fixed.shape))
+            # e.g. tensor([  1,   3,   5,   7,   9,  11,  13,  15,  17,  19,  21,  23,  25,  27,
+            # basically, taking every `step`-th element from the full-sized padded image
             indices_x = torch.arange(self.cps//2, self.padded_fixed.shape[0], step=self.cps)#[1:]
             indices_y = torch.arange(self.cps//2, self.padded_fixed.shape[1], step=self.cps)
             indices_z = torch.arange(self.cps//2, self.padded_fixed.shape[2], step=self.cps)
             self.sh1 = len(indices_x)
             self.sh2 = len(indices_y)
             self.sh3 = len(indices_z)
+            print(f"sh1: {self.sh1}, sh2: {self.sh2}, sh3: {self.sh3}")
             x, y, z = torch.meshgrid(indices_x, indices_y, indices_z, indexing='ij')
-            indices_z = (z + y * self.padded_fixed.shape[0] + x * self.padded_fixed.shape[1] * self.padded_fixed.shape[2]).flatten()
+            # x = y = z = torch.Size([99, 99, 99]) # 99 control points i.e. ((original image size + 2*padding) / 2)
+            # conversion of 3D indices to 1D indices
+            indices_z = (z + y*self.padded_fixed.shape[0] + x*self.padded_fixed.shape[1]*self.padded_fixed.shape[2]).flatten()
             self.control_point_indices = indices_z
 
             self.possible_coordinate_tensor = general.make_coordinate_tensor(self.padded_fixed.shape)
             self.control_points = self.possible_coordinate_tensor[self.control_point_indices]
-            control_point_mask = self.padded_mask.flatten()[self.control_point_indices]
-            self.control_points_masked = self.control_points[control_point_mask > 0]
+            # control_point_mask = self.padded_mask.flatten()[self.control_point_indices]
+            # self.control_points_masked = self.control_points[control_point_mask > 0]
 
         elif self.transformation_type == 'dense':
             self.sh = self.fixed_image.shape[0]
+            # # use the mask to create a coordinate tensor
             # self.possible_coordinate_tensor = general.make_masked_coordinate_tensor(self.mask.cpu(), self.fixed_image.shape)
+            # without using masks
             self.possible_coordinate_tensor = general.make_coordinate_tensor(self.fixed_image.shape)
             self.possible_coordinate_tensor_val = general.make_coordinate_tensor(self.fixed_image.shape)
 
 
         if self.gpu:
+            print("Moving to GPU")
             self.moving_image = self.moving_image.cuda()
             self.fixed_image = self.fixed_image.cuda()
             # self.padded_fixed = self.padded_fixed.cuda()
@@ -420,63 +402,97 @@ class ImplicitRegistrator:
             model_input.requires_grad = True
             coordinate_tensor.retain_grad()
 
+        # reset the gradients
         self.deform_net.train()
 
+        # dense -- input shape: torch.Size([890000, 3])
         loss = 0
         aff_coords = coordinate_tensor
         output = self.deform_net.forward(model_input)
-        def_coords = torch.add(output, aff_coords)
+        def_coords = torch.add(output, aff_coords)  # TODO: why add? because the objective is to learn phi(x) = x + u(x) s.t. M(phi(x)) = F(x)
 
         image_size = self.fixed_image.shape
 
         if self.transformation_type == 'bspline':
-            def_coords = def_coords.reshape(1, self.sh1, self.sh2, self.sh3, 3).permute(0, 4, 1, 2, 3)
-            coordinate_tensor = coordinate_tensor.reshape(1, self.sh1, self.sh2, self.sh3, 3).permute(0, 4, 1, 2, 3)
+            # -----------------------------------------
+            # Something is happening here
+            def_coords = def_coords.reshape(1, self.sh1, self.sh2, self.sh3, 3).permute(0, 4, 1, 2, 3)      # [B, C, H, W, D]
             def_coords = self.transformation(def_coords, stride=self.cps, shape=image_size, kernel=self.kernel)
+            def_coords = def_coords.permute(0, 2, 3, 4, 1)      # [B, H, W, D, C]   # C=3 because of 3 coordinates (x,y,z)
+
+            coordinate_tensor = coordinate_tensor.reshape(1, self.sh1, self.sh2, self.sh3, 3).permute(0, 4, 1, 2, 3)    # [B, C, H, W, D]
             coordinate_tensor = self.transformation(coordinate_tensor, stride=self.cps, shape=image_size, kernel=self.kernel)
-            coordinate_tensor = coordinate_tensor.permute(0, 2, 3, 4, 1)
-            def_coords = def_coords.permute(0, 2, 3, 4, 1)
+            coordinate_tensor = coordinate_tensor.permute(0, 2, 3, 4, 1)    # [B, H, W, D, C]   # C=3 because of 3 coordinates (x,y,z)  
+            # -----------------------------------------
 
-            fixed_image = torch.nn.functional.grid_sample(self.fixed_image[None, None], coordinate_tensor,
-                                                          align_corners=True).squeeze()
-            transformed_image = torch.nn.functional.grid_sample(self.moving_image[None, None], def_coords,
-                                                                align_corners=True).squeeze()
+            fixed_image = torch.nn.functional.grid_sample(self.fixed_image[None, None], coordinate_tensor, align_corners=True).squeeze()
+            transformed_image = torch.nn.functional.grid_sample(self.moving_image[None, None], def_coords, align_corners=True).squeeze()
+            
+            # # NOTE: in the transformed image, the INR is learning to stretch the intensities of the moving image (smaller FoV) to the
+            # # fixed image (larger FoV). What if we mask out the intensities of the transformed image outside the mask of the moving image FoV?
+            # transformed_image = transformed_image * self.moving_mask
+            
+            # NOTE: as per voxel-morph paper, this is what should not be done
+            # transform each channel of the label map separately using linear interpolation and then compute Dice
+            fixed_seg = torch.nn.functional.grid_sample(self.fixed_seg[None, None], coordinate_tensor, align_corners=True, mode='nearest').squeeze()
+            transformed_seg = torch.nn.functional.grid_sample(self.moving_seg[None, None], def_coords, align_corners=True, mode='nearest').squeeze()
+
         else:
-
+            # TODO: resample the def_coords of the moving image to the same voxel grid as the fixed image, then "dense"
+            # transformation will also work
             fixed_image = torch.nn.functional.grid_sample(self.fixed_image[None, None], coordinate_tensor[None, None, None],
                                         align_corners=True).squeeze()
-
             transformed_image = torch.nn.functional.grid_sample(self.moving_image[None, None], def_coords[None, None, None],
                                                 align_corners=True).squeeze()
-
+            
         aff_coords = coordinate_tensor
 
-        # Compute the loss
-        loss += self.criterion(fixed_image[None, None], transformed_image[None, None])
+        # Compute the loss (on the images)
+        loss_img = self.criterion(fixed_image[None, None], transformed_image[None, None])
+        # compute the loss on the segmentations
+        loss_seg = self.seg_criterion(fixed_seg, transformed_seg)
 
-        # Store the value of the data loss
-        if self.verbose:
-            self.data_loss_list[epoch] = loss.detach().cpu().numpy().item()
+        # # Store the value of the data loss
+        # if self.verbose:
+        #     self.data_loss_list[epoch] = loss.detach().cpu().numpy().item()
 
+        # Relativation of output
         output_rel = torch.subtract(def_coords, aff_coords)
+        
         # Regularization
         if self.bending_regularization:
             if self.transformation_type == 'dense':
                 bending_reg = regularizers.bending_energy_loss(output_rel[None][None].permute(0, 1, 3, 2))
             elif self.transformation_type == 'bspline':
                 bending_reg = regularizers.l2reg_loss(output_rel.permute(0, 4, 1, 2, 3))
+                # bending_reg = regularizers.bending_energy_loss(output_rel[None][None].permute(0, 1, 3, 2))
+            loss_bending_energy = self.alpha_bending * bending_reg
 
-            loss += self.alpha_bending * bending_reg
+        # Compute the total loss
+        loss = (loss_img + loss_seg + loss_bending_energy) #.mean()
+        # loss = (loss_img + loss_bending_energy)
 
         for param in self.deform_net.parameters():
             param.grad = None
 
-        loss.backward(retain_graph=True)
+        # loss.backward(retain_graph=True)
+        loss.backward()
         self.optimizer.step()
+
+        # log the loss to wandb
+        if epoch % self.log_interval == 0:
+            wandb.log({
+                "loss_img_train": loss.detach().cpu().numpy().item(),
+                "loss_seg_train": loss_seg.detach().cpu().numpy().item(),
+                "loss_bending_train": loss_bending_energy.detach().cpu().numpy().item(),
+                "epoch": epoch
+            })
 
         # Store the value of the total loss
         if self.verbose:
             self.loss_list[epoch] = loss.detach().cpu().numpy()
+        
+        return loss.detach().cpu().numpy().item()
 
     def validation_iteration(self, epoch, coordinate_tensor=None, model_input=None):
 
@@ -491,11 +507,12 @@ class ImplicitRegistrator:
 
             if self.transformation_type == 'bspline':
                 def_coords = def_coords.reshape(1, self.sh1, self.sh2, self.sh3, 3).permute(0, 4, 1, 2, 3)
-                coordinate_tensor = coordinate_tensor.reshape(1, self.sh1, self.sh2, self.sh3, 3).permute(0, 4, 1, 2, 3)
                 def_coords = self.transformation(def_coords, stride=self.cps, shape=image_size, kernel=self.kernel)
+                def_coords = def_coords.permute(0, 2, 3, 4, 1)
+
+                coordinate_tensor = coordinate_tensor.reshape(1, self.sh1, self.sh2, self.sh3, 3).permute(0, 4, 1, 2, 3)
                 coordinate_tensor = self.transformation(coordinate_tensor, stride=self.cps, shape=image_size, kernel=self.kernel)
                 coordinate_tensor = coordinate_tensor.permute(0, 2, 3, 4, 1)
-                def_coords = def_coords.permute(0, 2, 3, 4, 1)
             else:
                 coordinate_tensor = coordinate_tensor.reshape(1, image_size[0], image_size[1], image_size[2], 3)
                 def_coords = def_coords.reshape(1, image_size[0], image_size[1], image_size[2], 3)
@@ -504,33 +521,42 @@ class ImplicitRegistrator:
             self.batch['disp_pred'] = def_coords - aff_coords
 
             fixed_image = torch.nn.functional.grid_sample(self.fixed_image[None, None], coordinate_tensor, align_corners=True).squeeze()
-
             self.batch['fixed'] = fixed_image
+            
             moving_image = torch.nn.functional.grid_sample(self.moving_image[None, None], coordinate_tensor, align_corners=True).squeeze()
-
             self.batch['moving'] = moving_image
+
             fixed_seg = torch.nn.functional.grid_sample(self.fixed_seg[None, None], coordinate_tensor, align_corners=True, mode='nearest').squeeze()
-
             self.batch['fixed_seg'] = fixed_seg
-            fixed_mask = torch.nn.functional.grid_sample(self.fixed_mask[None, None], coordinate_tensor, align_corners=True, mode='nearest').squeeze()
 
-            self.batch['fixed_mask'] = fixed_mask
+            # fixed_mask = torch.nn.functional.grid_sample(self.fixed_mask[None, None], coordinate_tensor, align_corners=True, mode='nearest').squeeze()
+            # self.batch['fixed_mask'] = fixed_mask
+
             moving_seg = torch.nn.functional.grid_sample(self.moving_seg[None, None], coordinate_tensor, align_corners=True, mode='nearest').squeeze()
-
             self.batch['moving_seg'] = moving_seg
+
+            # # save moving image
+            # save_nifti(self.moving_image.cpu().detach().numpy().squeeze(), path=f'moving_image_before_{epoch}.nii.gz', verbose=True)
+
             transformed_image = torch.nn.functional.grid_sample(self.moving_image[None, None], def_coords, align_corners=True).squeeze()
-
+            # # NOTE: in the transformed image, the INR is learning to stretch the intensities of the moving image (smaller FoV) to the
+            # # fixed image (larger FoV). What if we mask out the intensities of the transformed image outside the mask of the moving image FoV?
+            # transformed_image = transformed_image * self.moving_mask
             self.batch['warped_moving'] = transformed_image
-            warped_moving_seg = torch.nn.functional.grid_sample(self.moving_seg[None, None], def_coords, align_corners=True, mode='nearest').squeeze()
+            # save_nifti(transformed_image.cpu().detach().numpy().squeeze(), path=f'moving_image_after_{epoch}.nii.gz', verbose=True)
 
+            warped_moving_seg = torch.nn.functional.grid_sample(self.moving_seg[None, None], def_coords, align_corners=True, mode='nearest').squeeze()
+            # warped_moving_seg = warped_moving_seg * self.moving_mask
             self.batch['warped_seg'] = warped_moving_seg
 
-            # Compute the loss
-            loss += self.criterion(fixed_image[None, None], transformed_image[None, None])
+            # Compute the loss on the images
+            loss_img = self.criterion(fixed_image[None, None], transformed_image[None, None])
+            # compute the loss on the segmentations
+            loss_seg = self.seg_criterion(fixed_seg, warped_moving_seg)
 
-            # Store the value of the data loss
-            if self.verbose:
-                self.data_loss_list[epoch] = loss.detach().cpu().numpy().item()
+            # # Store the value of the data loss
+            # if self.verbose:
+            #     self.data_loss_list[epoch] = loss.detach().cpu().numpy().item()
 
             # Relativation of output
             output_rel = torch.subtract(def_coords, aff_coords)
@@ -540,12 +566,40 @@ class ImplicitRegistrator:
                     bending_reg = regularizers.bending_energy_loss(output_rel.permute(0, 4, 1, 2, 3))
                 elif self.transformation_type == 'bspline':
                     bending_reg = regularizers.l2reg_loss(output_rel.permute(0, 4, 1, 2, 3))
-                loss += self.alpha_bending * bending_reg
+                loss_bending_energy = self.alpha_bending * bending_reg
+
+            # Compute the total loss
+            # loss = (loss_img + loss_seg + loss_bending_energy) #.mean()
+            loss = (loss_img + loss_bending_energy) #.mean()
+
+            if epoch % self.log_interval == 0:
+                wandb.log({
+                    "loss_img_val": loss_img.detach().cpu().numpy().item(),
+                    "loss_seg_val": loss_seg.detach().cpu().numpy().item(),
+                    "loss_bending_val": loss_bending_energy.detach().cpu().numpy().item(),
+                    "epoch": epoch
+                })
 
             field = (def_coords-aff_coords).reshape(image_size[0]*image_size[1]*image_size[2], 3) #* self.fixed_mask.flatten().repeat(3, 1).permute(1, 0)
-            general.visualise_results(fixed_image.clone().reshape(image_size[0], image_size[1], image_size[2]).detach(), moving_image.clone().detach(), transformed_image, field.clone().detach().cpu(), title='Validation intensities', show=False, cmap='gray')
-            general.visualise_results(fixed_seg.clone().reshape(image_size[0], image_size[1], image_size[2]).detach(), moving_seg.clone().detach(), warped_moving_seg, field.clone().detach().cpu(), title='Validation segmentations', show=False, cmap='jet')
+            fig_image = general.visualise_results(
+                fixed_image.clone().reshape(image_size[0], image_size[1], image_size[2]).detach(), 
+                moving_image.clone().detach(), 
+                transformed_image, 
+                field.clone().detach().cpu(), 
+                title='Validation intensities', show=True, cmap='gray', epoch=epoch)
+            wandb.log({"Validation intensities": fig_image})
+            # close the figure
+            plt.close(fig_image)
 
+            fig_seg = general.visualise_results(
+                fixed_seg.clone().reshape(image_size[0], image_size[1], image_size[2]).detach(), 
+                moving_seg.clone().detach(), 
+                warped_moving_seg, 
+                field.clone().detach().cpu(), 
+                title='Validation segmentations', show=True, cmap='jet', epoch=epoch)
+            wandb.log({"Validation segmentations": fig_seg})
+            # close the figure
+            plt.close(fig_seg)
 
             for param in self.deform_net.parameters():
                 param.grad = None
@@ -556,12 +610,18 @@ class ImplicitRegistrator:
 
             disp_res = measure_disp_metrics({'disp_pred': self.batch['disp_pred'].cpu().permute(0, 4, 1, 2, 3)})
             metrics.update({f'{k}': metric.item() for k, metric in disp_res.items()})
+            # add epcohs to the metrics
+            metrics['epoch'] = epoch
+            # print folding_ratio
+            print(f'\nFolding ratio: {disp_res["folding_ratio"] * 100:.2f}% \t Mean dice: {metrics["mean_dice"]:.2f}')
+            if epoch % self.log_interval == 0:
+                wandb.log(metrics)
 
             # stopping criteria
             flag = 0
-            if disp_res['folding_ratio'] * 100 >= 0.9:
-                print(f'\n1% folding ratio reached at epoch {epoch}\n')
-                flag = 1
+            # if disp_res['folding_ratio'] * 100 >= 0.9:
+            #     print(f'\n1% folding ratio reached at epoch {epoch}\n')
+            #     flag = 1
 
             return metrics, flag
 
@@ -614,25 +674,31 @@ class ImplicitRegistrator:
             coordinate_tensor_train = self.possible_coordinate_tensor
             coordinate_tensor_val = self.possible_coordinate_tensor_val
 
-
+        # positional encoding is False by default
+        # so, `model_input_train` is same as `coordinate_tensor_train` (which is basically the set of control points)
         if self.positional_encoding:
             mapping_size = self.mapping_size # of FF
             B_gauss = torch.tensor(np.random.normal(scale=self.scale, size=(mapping_size, 3)),
                                    dtype=torch.float32, device="cuda")
             input_mapper = input_mapping(B=B_gauss, factor=self.factor).to("cuda")
+            # print(f"before mapping: {coordinate_tensor_train.shape}")
             model_input_train = input_mapper(coordinate_tensor_train)
+            # print(f"after mapping: {model_input_train.shape}")
             model_input_val = input_mapper(coordinate_tensor_val)
         else:
             model_input_train = coordinate_tensor_train
             model_input_val = coordinate_tensor_val
 
         # Perform training iterations
-        for i in tqdm.tqdm(range(epochs-1)):
-            self.training_iteration(i, self.affine_epochs, coordinate_tensor_train, model_input_train)
+        pbar = tqdm.tqdm(range(epochs-1))
+        for i in pbar:
+            loss_train = self.training_iteration(i, self.affine_epochs, coordinate_tensor_train, model_input_train)
+            pbar.set_postfix({'Loss': loss_train})
             if i % self.log_interval == 0:
                 _, flag = self.validation_iteration(i, coordinate_tensor_val, model_input_val)
-                if flag:
-                    break
+                # NOTE: disabling the stopping criteria for debugging purposes
+                # if flag:
+                #     break
 
         print('\nTesting:\n')
         metrics, _ = self.validation_iteration(i, coordinate_tensor_val, model_input_val)
