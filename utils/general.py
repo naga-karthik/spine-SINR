@@ -104,8 +104,6 @@ def normalise_intensity(x,
     return x
 
 
-
-
 def crop_and_pad(x, new_size=192, mode="constant", **kwargs):
     """
     Crop and/or pad input to new size.
@@ -165,14 +163,15 @@ def param_ndim_setup(param, ndim):
         raise TypeError("Parameter type not int, tuple or list")
     return param
 
-def visualise_results(fixed_image, moving_image, transformed_image, def_coords, title="Validation intensities", show=True, cmap='gray'):
+def visualise_results(fixed_image, moving_image, transformed_image, def_coords, title="Validation intensities", show=True, cmap='gray',
+                      epoch=None):
 
     image_size = fixed_image.shape
     field = def_coords.reshape(*image_size, 3).cpu() * image_size[0]/2
     field = np.transpose(field)
     field = field.permute(0, 3, 2, 1)
 
-    fig, ax = plt.subplots(3, 6, figsize=(15, 15))
+    fig, ax = plt.subplots(3, 6, figsize=(17, 12))  # Increased figure size to make each column larger
 
     slices = None
     if slices is None:
@@ -185,37 +184,56 @@ def visualise_results(fixed_image, moving_image, transformed_image, def_coords, 
         # z = 64
         z = slices[a]
 
-        fixedAx = torch.index_select(fixed_image.cpu().clone().reshape(image_size), dim=a, index=torch.tensor([z])).squeeze().numpy()
-        movingAx = torch.index_select(moving_image.clone().cpu().reshape(image_size), dim=a, index=torch.tensor([z])).squeeze().numpy()
-        warpedAx = torch.index_select(transformed_image.detach().cpu().clone().reshape(image_size), dim=a, index=torch.tensor([z])).squeeze().numpy()
+        fixedAx = torch.index_select(
+            fixed_image.cpu().clone().reshape(image_size), dim=a, index=torch.tensor([z])
+            ).squeeze().numpy()
+        movingAx = torch.index_select(
+            moving_image.clone().cpu().reshape(image_size), dim=a, index=torch.tensor([z])
+            ).squeeze().numpy()
+        warpedAx = torch.index_select(
+            transformed_image.detach().cpu().clone().reshape(image_size), dim=a, index=torch.tensor([z])
+            ).squeeze().numpy()
 
         s1 = ax[a, 0].imshow(fixedAx, cmap=cmap)
         plt.colorbar(s1, ax=ax[a, 0], fraction=0.045)
         ax[a, 0].set_title('Fixed')
+        
         s2 = ax[a, 1].imshow(movingAx, cmap=cmap)
-        ax[a, 1].set_title('Moving')
         plt.colorbar(s2, ax=ax[a, 1], fraction=0.045)
+        ax[a, 1].set_title('Moving')
+        
         s3 = ax[a, 2].imshow(warpedAx, cmap=cmap)
-        ax[a, 2].set_title('Warped')
         plt.colorbar(s3, ax=ax[a, 2], fraction=0.045)
+        ax[a, 2].set_title('Warped')
+        
         s4 = ax[a, 3].imshow(movingAx - fixedAx, cmap='seismic')
         plt.colorbar(s4, ax=ax[a, 3], fraction=0.045)
         ax[a, 3].set_title('Error before')
         s4.set_clim(-1.0, 1.0)
         # plt.show()
+        
         s5 = ax[a, 4].imshow(warpedAx - fixedAx, cmap='seismic')
         plt.colorbar(s5, ax=ax[a, 4], fraction=0.045)
         ax[a, 4].set_title('Error after')
         s5.set_clim(-1.0, 1.0)
+        
         fieldAx = torch.index_select(field[axes, ...], dim=a+1, index=torch.tensor([z])).squeeze().numpy()
-        plot_warped_grid(ax[a, 5], fieldAx, None, interval=5, title=f"axis {a}", fontsize=20)
+        plot_warped_grid(ax[a, 5], fieldAx, None, interval=5, title=f"axis {a}", fontsize=12)
 
         ne_disps.append(torch.tensor(fieldAx).permute(1, 2, 0).numpy()[::4, ::4]/4)
 
+        for i in range(6):
+            ax[a, i].axis('off')
+
+    # Adjust the spacing between rows
+    fig.subplots_adjust(hspace=0.05, wspace=0.2)  # Reduced hspace to decrease the space between rows
+
     if show:
         plt.show()
+        # save image
 
-    plt.close('all')
+    return fig
+    # plt.close('all')
 
 
 def plot_warped_grid(ax, disp, bg_img=None, interval=3, title="$\mathcal{T}_\phi$", fontsize=30, color='c'):
@@ -346,10 +364,15 @@ def make_coordinate_tensor(dims=(28, 28, 28), gpu=True):
     """Make a coordinate tensor."""
 
     coordinate_tensor = [torch.linspace(-1, 1, dims[i]) for i in range(3)]
-    coordinate_tensor = torch.meshgrid(*coordinate_tensor, indexing='ij')
-    coordinate_tensor = torch.stack(coordinate_tensor, dim=3)
-    coordinate_tensor = coordinate_tensor.view([np.prod(dims), 3])
-
+    # generates a meshgrid from these three 1D tensors. output is three 3D tensors (one for each dimension) of shape (dims[0], dims[1], dims[2]). 
+    # Each tensor represents the coordinates along one of the axes.
+    coordinate_tensor = torch.meshgrid(*coordinate_tensor, indexing='ij')   # coordinate_tensor[0].shape -- torch.Size([192, 192, 192])
+    # stack these three 3D tensors along a new dimension, creating a single 4D tensor of shape (dims[0], dims[1], dims[2], 3).
+    # each element at position (x, y, z) in this tensor is a 3-element vector representing the coordinates [x, y, z] in the original 3D space.
+    coordinate_tensor = torch.stack(coordinate_tensor, dim=3)               # coordinate_tensor.shape -- torch.Size([192, 192, 192, 3])
+    # flattens the 3D grid of coordinates into a 2D matrix, where each row represents the 3D coordinates of a point in the original grid. 
+    coordinate_tensor = coordinate_tensor.view([np.prod(dims), 3])          # coordinate_tensor.shape -- torch.Size([7077888, 3])
+ 
     coordinate_tensor = coordinate_tensor.cuda()
 
     return coordinate_tensor
