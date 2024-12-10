@@ -1,6 +1,6 @@
 setup:
-    project: "INR_NLST"
-    entity: vasl12
+    project: "inr_registration_superres"
+    entity: naga-karthik
     mode: online
 watch:
     log: all

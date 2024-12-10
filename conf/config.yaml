@@ -1,6 +1,6 @@
 defaults:
   - _self_
-  - data: brain_camcan
+  - data: spine_generic
   - network: deformable
   - transformation: bspline
   - loss: nmi
@@ -16,7 +16,7 @@ analyse_only: False
 
 wandb_disable: "False"
 verbose: 1
-gpu: 0
+gpu: 1
 baselines: False
 slurm: False
 

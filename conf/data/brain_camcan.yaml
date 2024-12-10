@@ -2,14 +2,18 @@ name: brain_camcan
 ndim: 3
 
 batch_size: 1
-coords_batch_size: 350000
+coords_batch_size: 890000
 num_workers: 8
 shuffle: True
 use_mask: True
 
-modality: t1t2
-crop_size: [192, 192, 192]
+modality: t1t1
+exp_type: mask0.5_ds222   # yshift, ds222, ds224 (downsample), mask0.5
+crop_size: {
+  "fixed": [192, 192, 192], 
+  "moving": [96, 96, 96],
+}
 voxel_size: [1.0, 1.0, 1.0]
 
-data_dir_path: /home/pti/Documents/datasets/camcan_malpem/val/
+data_dir_path: /home/GRAMES.POLYMTL.CA/u114716/inrs-registration-superres/temp_data/camcan
 atlas_path:
