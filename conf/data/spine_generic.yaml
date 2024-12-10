@@ -1,0 +1,20 @@
+name: spine_generic
+ndim: 3
+
+batch_size: 1
+coords_batch_size: 10000  # changed 900k to 10k; not used in bspline t/f but only in dense
+num_workers: 8
+shuffle: True
+use_mask: True
+
+modality: t1t1
+exp_type: nat   # nat (native), shift, ds222, ds224 (downsample), mask0.5
+# original shapes of images; T1w - 132x168x189, T2w - 64x191x226
+crop_size: {
+  "fixed": [192, 192, 192], #[192, 192, 192], #[132, 168, 192],
+  "moving": [192, 192, 192], #[48, 102, 224], #[132, 168, 192],
+  # "moving": [128, 128, 128],
+}
+
+data_dir_path: /home/GRAMES.POLYMTL.CA/u114716/inrs-registration-superres/temp_data/spine-generic-sc-cropped
+atlas_path: 
