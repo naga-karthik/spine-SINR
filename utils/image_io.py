@@ -25,7 +25,8 @@ def save_nifti(x, path, nim=None, verbose=False):
         N/A
     """
     if nim is not None:
-        nim_save = nib.Nifti1Image(x, nim.affine, nim.header)
+        # nim_save = nib.Nifti1Image(x, nim.affine, nim.header)
+        nim_save = nib.Nifti1Image(x, nim['affine'], nim['header'])
     else:
         nim_save = nib.Nifti1Image(x, np.eye(4))
     nib.save(nim_save, path)
